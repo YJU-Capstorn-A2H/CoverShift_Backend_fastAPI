@@ -1,6 +1,6 @@
 -- =====================================================================
--- CoverShift DB schema V5
--- source: CoverShift_통합백엔드API및DB스키마명세서_V5_FullVersion.md PART 2
+-- CoverShift DB schema V5.1
+-- source: CoverShift_통합백엔드API및DB스키마명세서_V5.1_FullVersion.md PART 2
 -- (SQL 본문은 명세서 그대로. 이 파일에서 추가한 것은 "[역할]/[연결]" 설명과 용어집뿐)
 --
 -- run:
@@ -168,30 +168,23 @@ ALTER TABLE time_bands
 
 
 -- -----------------------------------------------------
--- 2. 계정 / 인증 (LINE Login & 초대 관리)
+-- 2. 계정 / 인증 (매직링크 & 관리자 로그인)
 -- -----------------------------------------------------
 
--- [역할] LINE 로그인 계정과 직원을 연결한다. 직원 1명당 계정 1개 (staff_id가 UNIQUE).
--- [핵심] role = 'staff'(직원) 또는 'manager'(관리자)
--- [연결] employees를 참조.
-CREATE TABLE accounts (
-    account_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    staff_id      UUID NOT NULL UNIQUE REFERENCES employees(staff_id),
-    line_user_id  TEXT NOT NULL UNIQUE,   -- LINE id_token의 sub 클레임 (Provider 내 공통)
-    display_name  TEXT,                   -- LINE 프로필 이름 (참고용)
-    role          TEXT NOT NULL CHECK (role IN ('staff', 'manager')),
-    linked_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+-- ** V5.1 ** accounts(LINE Login 겸용)와 invite_tokens는 삭제했다.
+--   아르바이트의 PWA 접근은 매직링크(magic_link_tokens). shift_periods를 참조하므로 shift_periods 뒤에 있다.
+--   관리자(Web) 로그인은 manager_accounts(이메일/비밀번호).
 
--- 초대 토큰 (관리자가 직원 등록 후 초대 링크 발급용)
--- [역할] 관리자가 직원을 등록한 뒤 발급하는 초대 링크용 토큰. 만료 시각·사용 시각을 기록한다.
--- [연결] employees를 참조.
-CREATE TABLE invite_tokens (
-    token         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    staff_id      UUID NOT NULL REFERENCES employees(staff_id),
-    role          TEXT NOT NULL CHECK (role IN ('staff', 'manager')),
-    expires_at    TIMESTAMPTZ NOT NULL,
-    used_at       TIMESTAMPTZ
+-- 관리자 계정 (소수 인원 간이 인증. 최초 1명은 DB 시드 스크립트로 생성)
+-- [역할] 관리자(Web 화면) 로그인용 계정. 이메일/비밀번호 방식. 관리자는 소수라서 간단한 인증으로 충분하다.
+-- [핵심] 최초 관리자 1명은 시드 스크립트로 넣는다. password_hash에는 비밀번호 원문이 아니라 해시값을 저장한다.
+-- [연결] employees를 참조. 직원 1명당 관리자 계정은 최대 1개(staff_id가 UNIQUE).
+CREATE TABLE manager_accounts (
+    manager_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    staff_id       UUID NOT NULL UNIQUE REFERENCES employees(staff_id),
+    email          TEXT NOT NULL UNIQUE,
+    password_hash  TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- LINE 연동 계정 매칭 테이블 (Webhook/수동 매칭용)
@@ -263,16 +256,38 @@ CREATE TABLE congestion_manual (
 -- AI가 추측하지 않고 관리자가 사실을 입력한다). 제출 마감은 기간마다 관리자가 수동으로 설정한다.
 -- [역할] 시프트를 짜는 대상 기간과 희망 제출 마감 시각. 관리자가 시프트를 짜기 전에 먼저 등록한다.
 -- [핵심] max_revision = 재조정을 최대 몇 번까지 허용하는지 (1~5)
--- [연결] 희망 제출·시프트 초안이 period_id로 이 표를 참조한다.
+--        notify_at = 매직링크를 자동으로 보내는 예정 일시 (스케줄러가 감시). 
+--        notified_at = 실제로 보낸 일시 (NULL이면 미발송).
+-- [연결] 희망 제출·시프트 초안·매직링크 토큰이 period_id로 이 표를 참조한다.
 CREATE TABLE shift_periods (
     period_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     period_start         DATE NOT NULL,
     period_end           DATE NOT NULL,
     submission_deadline  TIMESTAMPTZ NOT NULL,   -- 이 시각 이후의 제출은 "변경 리퀘스트"로 분류
+    notify_at            TIMESTAMPTZ NOT NULL,   -- 매직링크 자동 발송 예정 일시 (관리자 입력. 스케줄러가 감시)
+    notified_at          TIMESTAMPTZ,            -- 실제로 일괄 발송한 일시. NULL = 미발송 (중복 발송 방지)
     max_revision         INT NOT NULL DEFAULT 2 CHECK (max_revision BETWEEN 1 AND 5),  -- 관리자 슬라이더 값
     created_by           UUID REFERENCES employees(staff_id),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (period_end >= period_start)
+);
+
+
+-- 매직링크 토큰 (아르바이트의 PWA 접근용)
+-- [역할] 아르바이트가 LINE에서 받은 링크로 PWA(희망 시프트 제출 화면)를 여는 데 쓰는 토큰. 로그인 대신이다.
+-- [핵심] expires_at = 발급 시 shift_periods.submission_deadline과 같은 값 (마감 = 링크 실효, 서비스 레이어 규칙).
+--        유효기간 내에는 같은 링크를 다시 열 수 있다. used_at은 최초 접근 시각을 남기는 참고값이다.
+--        LINE 매칭(line_contact_registry)이 끝난 직원에게만 발급한다 (서비스 레이어에서 강제).
+-- [연결] employees(받는 직원), shift_periods(어느 제출 기간의 링크인지)를 참조한다.
+CREATE TABLE magic_link_tokens (
+    token       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    staff_id    UUID NOT NULL REFERENCES employees(staff_id),
+    purpose     TEXT NOT NULL,                 -- 예: 'shift_submission'
+    period_id   UUID REFERENCES shift_periods(period_id),
+    issued_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ,
+    CONSTRAINT magic_link_expiry_after_issue CHECK (expires_at > issued_at)
 );
 
 
