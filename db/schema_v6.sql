@@ -161,18 +161,18 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 --        (예: 「17」)의 끝 시각을 정하는 재료. 시프트표만 봐서는 끝 시각을 알 수 없고,
 --        AI가 지어내면 안 되기 때문에(실험: 같은 입력에서 8:00~17:00이 되기도, 17:00~22:00이 되기도 했다)
 --        직원마다 「끝나는 방식」을 미리 등록해 둔다.
---          '계약시간까지' → 끝 시각 = 시작 + contract_hours   (예: 시작 9:00, 5.0시간 → 14:00)
---          '폐점까지'     → 끝 시각 = 폐점 시각
+--          'until_contract_hours' → 끝 시각 = 시작 + contract_hours   (예: 시작 9:00, 5.0시간 → 14:00)
+--          'until_closing'     → 끝 시각 = 폐점 시각
 --          NULL(미확인)   → 점장이 확인하기 전에는 그 기호의 근무를 저장하지 않는다
 --        같은 사람이 날마다 끝나는 방식이 다른지는 미확인이라서, 직원 단위로 충분한지는
 --        팀 확인 필요(PART 8.5 #16).
 CREATE TABLE employees (
     staff_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            TEXT NOT NULL,
-    employment_type TEXT CHECK (employment_type IN ('정직원', '파트타이머', '아르바이트')),
+    employment_type TEXT CHECK (employment_type IN ('full_time', 'part_time', 'arbeit')),
     hired_at        DATE,
-    shift_end_mode  TEXT CHECK (shift_end_mode IN ('계약시간까지', '폐점까지')),  -- ** V6 2차 신규(제안) ** 시작 시각만 적힌 기호의 끝 시각을 정하는 방식. NULL = 미확인. 같은 사람이 날마다 다른지는 미확인(PART 8.5 #16)
-    contract_hours  NUMERIC(3,1) CHECK (contract_hours IS NULL OR contract_hours > 0),   -- ** V6 2차 신규(제안) ** 계약 근무 시간(예: 5.0). shift_end_mode = '계약시간까지'일 때 끝 시각 = 시작 + contract_hours
+    shift_end_mode  TEXT CHECK (shift_end_mode IN ('until_contract_hours', 'until_closing')),  -- ** V6 2차 신규(제안) ** 시작 시각만 적힌 기호의 끝 시각을 정하는 방식. NULL = 미확인. 같은 사람이 날마다 다른지는 미확인(PART 8.5 #16)
+    contract_hours  NUMERIC(3,1) CHECK (contract_hours IS NULL OR contract_hours > 0),   -- ** V6 2차 신규(제안) ** 계약 근무 시간(예: 5.0). shift_end_mode = 'until_contract_hours'일 때 끝 시각 = 시작 + contract_hours
     is_active       BOOLEAN NOT NULL DEFAULT TRUE
 );
 
@@ -366,7 +366,7 @@ CREATE TABLE magic_link_tokens (
 CREATE TABLE staff_skills (
     staff_id      UUID NOT NULL REFERENCES employees(staff_id),
     task_id       UUID NOT NULL REFERENCES tasks(task_id),
-    status        TEXT NOT NULL CHECK (status IN ('미확인', '지도필요', '단독대응가능')),
+    status        TEXT NOT NULL CHECK (status IN ('unconfirmed', 'needs_guidance', 'solo_ok')),
     verified_by   UUID REFERENCES employees(staff_id),
     verified_date TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (staff_id, task_id)
@@ -378,7 +378,7 @@ CREATE TABLE staff_skills (
 CREATE TABLE staff_skill_self_drafts (
     staff_id        UUID NOT NULL REFERENCES employees(staff_id),
     task_id         UUID NOT NULL REFERENCES tasks(task_id),
-    self_status     TEXT NOT NULL CHECK (self_status IN ('미확인', '지도필요', '단독대응가능')),
+    self_status     TEXT NOT NULL CHECK (self_status IN ('unconfirmed', 'needs_guidance', 'solo_ok')),
     self_draft_date TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (staff_id, task_id)
 );
@@ -441,8 +441,8 @@ CREATE TABLE shift_drafts (
 -- [역할] 초안 안의 배치 1행 = "누가, 어느 날, 몇 시부터 몇 시까지".
 -- [핵심] source = 이 배치가 어디서 왔는지 (희망반영 / agent제안 / 관리자수정)
 -- [연결] shift_drafts, employees를 참조. 초안을 지우면 배치도 함께 지워진다.
--- [메모] ** V6 ** 점장이 화면에서 직접 고친 행은 source = '관리자수정'. 고친 내용은 draft_edit_log에 남는다.
---        'agent제안'은 솔버의 제안을 뜻한다(AI가 아님).
+-- [메모] ** V6 ** 점장이 화면에서 직접 고친 행은 source = 'manager_edit'. 고친 내용은 draft_edit_log에 남는다.
+--        'agent_proposal'은 솔버의 제안을 뜻한다(AI가 아님).
 CREATE TABLE shift_assignments (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     draft_id   UUID NOT NULL REFERENCES shift_drafts(draft_id) ON DELETE CASCADE,
@@ -450,7 +450,7 @@ CREATE TABLE shift_assignments (
     date       DATE NOT NULL,
     start_time TIME NOT NULL,
     end_time   TIME NOT NULL,
-    source     TEXT NOT NULL CHECK (source IN ('희망반영', 'agent제안', '관리자수정')),
+    source     TEXT NOT NULL CHECK (source IN ('from_availability', 'agent_proposal', 'manager_edit')),
     CONSTRAINT assign_start_before_end CHECK (end_time > start_time)   -- ** V5 신규 **
 );
 -- ※ 같은 사람의 시간 겹침 배정은 DB에서 막지 않는다: requires_solo=false 업무는 겸무가 허용되며
@@ -508,7 +508,7 @@ CREATE TABLE shift_approvals (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     draft_id     UUID NOT NULL REFERENCES shift_drafts(draft_id),
     approved_by  UUID NOT NULL REFERENCES employees(staff_id),
-    action       TEXT NOT NULL CHECK (action IN ('승인', '재조정요청')),
+    action       TEXT NOT NULL CHECK (action IN ('approved', 'rebalance_requested')),
     approved_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -529,7 +529,7 @@ CREATE TABLE contact_rounds (
     draft_id       UUID NOT NULL REFERENCES shift_drafts(draft_id),
     violation_key  TEXT NOT NULL,     -- validation_violations.violation_key와 매핑
     max_contacts   INT NOT NULL DEFAULT 3,   -- 관리자 설정 최대 순차 연락 인원 (기본값 3)
-    status         TEXT NOT NULL CHECK (status IN ('진행중', '확정', '상한초과_관리자대기', '취소')) DEFAULT '진행중',
+    status         TEXT NOT NULL CHECK (status IN ('in_progress', 'confirmed', 'limit_exceeded_awaiting_manager', 'cancelled')) DEFAULT 'in_progress',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -546,8 +546,8 @@ CREATE TABLE contact_attempts (
     staff_id         UUID NOT NULL REFERENCES employees(staff_id),
     contact_order    INT NOT NULL,     -- 연락 우선순위 (1, 2, 3...)
     status           TEXT NOT NULL CHECK (status IN (
-        '대기', '발송됨', '가능', '불가능', '불확실', '타임아웃', '수동넘김', '취소'   -- ** V6 신규(제안): '수동넘김' **
-    )) DEFAULT '대기',
+        'pending', 'sent', 'available', 'unavailable', 'uncertain', 'timed_out', 'manually_skipped', 'cancelled'   -- ** V6 신규(제안): 'manually_skipped' **
+    )) DEFAULT 'pending',
     sent_at          TIMESTAMPTZ,
     responded_at     TIMESTAMPTZ,
     response_raw     TEXT,             -- LINE 원본 응답 텍스트 (참고용)
@@ -649,8 +649,8 @@ CREATE TABLE onboarding_imports (
     uploaded_by   UUID NOT NULL REFERENCES manager_accounts(manager_id),
     file_name     TEXT NOT NULL,
     status        TEXT NOT NULL CHECK (status IN (
-        '업로드됨', '해석중', 'AI제안완료', 'AI실패_수동지정', '점장확인완료', '반영완료', '폐기'
-    )) DEFAULT '업로드됨',
+        'uploaded', 'interpreting', 'ai_proposed', 'ai_failed_manual', 'manager_confirmed', 'applied', 'discarded'
+    )) DEFAULT 'uploaded',
     raw_grid      JSONB,     -- 업로드한 표의 원문(이름 포함). 삭제 후 NULL. AI에는 절대 전달하지 않는다
     token_map     JSONB,     -- 치환 대응표(TEXT_n → 원문). 서버에만 보관. 삭제 후 NULL
     manager_legend JSONB,    -- ** V6 2차 신규 ** 범례(기호→시간). 표 하단의 범례 칸에서 코드가 뽑거나 점장이 입력한다. 이름 검사를 통과한 것만 AI에 전달한다. 범례가 없는 월(원본의 7월 등)은 점장 입력
@@ -662,7 +662,7 @@ CREATE TABLE onboarding_imports (
     purged_at     TIMESTAMPTZ,   -- raw_grid / token_map을 지운 시각
     -- 반영 완료 또는 폐기된 작업에는 원문(이름)을 남기지 않는다
     CONSTRAINT import_purged_when_done CHECK (
-        status NOT IN ('반영완료', '폐기') OR (raw_grid IS NULL AND token_map IS NULL)
+        status NOT IN ('applied', 'discarded') OR (raw_grid IS NULL AND token_map IS NULL)
     )
 );
 
@@ -693,14 +693,14 @@ CREATE TABLE historical_shifts (
 --        점장이 기간(shift_periods)을 만들 때 「이번 달 지정휴일 ○일」을 함께 등록한다.
 --        직원별 휴일 수의 집계는 코드가 한다(AI 아님).
 -- [핵심] designated_off_days = 0~31의 정수. applies_to = 누구에게 적용되는지
---        ('정직원만' / '전원' / '미확인'). 기본값은 '미확인'(PART 8.5 #14).
+--        ('full_time_only' / 'all' / 'unconfirmed'). 기본값은 'unconfirmed'(PART 8.5 #14).
 --        ※ 법정 휴일 수가 아니라 「매장이 정한 지정휴일 수」로 한정한다. 노무 규제 판정은 보류 항목이다(V16 §15).
 -- [연결] shift_periods(기간당 1행, period_id가 곧 기본 키), manager_accounts(설정한 관리자)를 참조.
 -- [메모] 수가 맞지 않을 때 위반 코드로 할지 표시만 할지는 미정(PART 8.5 #14).
 CREATE TABLE period_off_rules (
     period_id           UUID PRIMARY KEY REFERENCES shift_periods(period_id),
     designated_off_days SMALLINT NOT NULL CHECK (designated_off_days BETWEEN 0 AND 31),
-    applies_to          TEXT NOT NULL DEFAULT '미확인' CHECK (applies_to IN ('정직원만', '전원', '미확인')),  -- 누구에게 적용되는지 미확인(PART 8.5 #14)
+    applies_to          TEXT NOT NULL DEFAULT 'unconfirmed' CHECK (applies_to IN ('full_time_only', 'all', 'unconfirmed')),  -- 누구에게 적용되는지 미확인(PART 8.5 #14)
     set_by              UUID REFERENCES manager_accounts(manager_id),
     set_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
