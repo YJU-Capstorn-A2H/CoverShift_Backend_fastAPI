@@ -5,7 +5,6 @@
 """
 import os
 from collections.abc import Iterator
-
 import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
@@ -23,6 +22,8 @@ if not _database_url:
 pool: ConnectionPool | None = None
 
 
+
+# DB接続プールを起動する
 def open_pool() -> None:
     global pool
     pool = ConnectionPool(
@@ -35,13 +36,14 @@ def open_pool() -> None:
     pool.open(wait=True, timeout=10)
 
 
+# DB接続プールを閉じる
 def close_pool() -> None:
     global pool
     if pool is not None:
         pool.close()
         pool = None
 
-
+# DB接続を取得する
 def get_conn() -> Iterator[psycopg.Connection]:
     """FastAPIの Depends 用。1リクエスト = 1接続。
 
