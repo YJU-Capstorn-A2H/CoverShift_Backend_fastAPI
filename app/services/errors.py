@@ -25,3 +25,8 @@ class InvalidInputError(ServiceError):
 # 締切後の提出(いまは、許可されない)
 class ForbiddenError(ServiceError):
     status_code = 403
+
+
+# すでに決まっていて、変えられない(発送済みの発送予定日時など)
+class ConflictError(ServiceError):
+    status_code = 409

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from app.core.db import close_pool, open_pool
-from app.routers import availability, health
+from app.routers import admin_shift_periods, availability, health
 
 # 環境変数を読み込む
 load_dotenv()
@@ -21,3 +21,4 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(availability.router)
+app.include_router(admin_shift_periods.router)
